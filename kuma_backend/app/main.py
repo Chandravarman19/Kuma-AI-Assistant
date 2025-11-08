@@ -11,21 +11,25 @@ import geocoder
 from pydub import AudioSegment
 from pydub.playback import play
 import io
+import traceback
 
-# -------------------------
-# ENV & CONFIG
-# -------------------------
+# ============================================================
+# ⚙️ ENV & CONFIG
+# ============================================================
 load_dotenv()
 
 MEMORY_FILE = "memory.json"
+TASK_FILE = "tasks.json"
 MAX_MEMORY_ITEMS = 50
 RECENT_MEMORIES_FOR_PROMPT = 5
-TASK_FILE = "tasks.json"
 
-# -------------------------
-# FastAPI Setup
-# -------------------------
-app = FastAPI()
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# ============================================================
+# 🚀 FastAPI Setup
+# ============================================================
+app = FastAPI(title="Kuma AI Assistant Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,28 +37,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
-# OpenAI Setup
-# -------------------------
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-MODEL = os.getenv("MODEL", "gpt-4o-mini")
+# ============================================================
+# 🧠 OpenAI Client
+# ============================================================
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -------------------------
-# Memory Handling
-# -------------------------
-def load_memory():
-    if not os.path.exists(MEMORY_FILE):
-        return []
+# ============================================================
+# 📂 Memory System
+# ============================================================
+def load_json_file(file_path, default=None):
+    if not os.path.exists(file_path):
+        return default or []
     try:
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return []
+        return default or []
 
-def save_memory(mem_list):
-    mem_list = mem_list[-MAX_MEMORY_ITEMS:]
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(mem_list, f, ensure_ascii=False, indent=2)
+def save_json_file(file_path, data):
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_memory():
+    return load_json_file(MEMORY_FILE, [])
+
+def save_memory(mem):
+    mem = mem[-MAX_MEMORY_ITEMS:]
+    save_json_file(MEMORY_FILE, mem)
 
 def add_memory(text: str):
     mem = load_memory()
@@ -71,21 +80,14 @@ def clear_memory():
     save_memory([])
     return []
 
-# -------------------------
-# 🧩 To-Do Task Memory
-# -------------------------
+# ============================================================
+# 🧾 To-Do Task System
+# ============================================================
 def load_tasks():
-    if not os.path.exists(TASK_FILE):
-        return []
-    try:
-        with open(TASK_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    return load_json_file(TASK_FILE, [])
 
 def save_tasks(tasks):
-    with open(TASK_FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
+    save_json_file(TASK_FILE, tasks)
 
 def add_task(task: str):
     tasks = load_tasks()
@@ -104,26 +106,39 @@ def clear_tasks():
     save_tasks([])
     return "All tasks cleared, Captain!"
 
-# -------------------------
-# 🎙️ Luffy-style Voice Output
-# -------------------------
-def speak_luffy_style(text: str):
-    """Generate and play AI speech that sounds lively like Luffy."""
+# ============================================================
+# 🔊 TTS (Voice Output)
+# ============================================================
+def speak_kuma(text: str):
+    """Generate and play TTS audio safely"""
     try:
         speech = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="alloy",  # replace later if official Luffy voice appears
-            input=f"{text} Yohoho Captain!"
+            voice="alloy",
+            input=text
         )
-        audio_data = io.BytesIO(speech.read())
-        sound = AudioSegment.from_file(audio_data, format="mp3")
+        audio_stream = io.BytesIO()
+        # speech.iter_bytes() may be used depending on SDK; using read() fallback if available
+        try:
+            # if response supports iter_bytes
+            for chunk in speech.iter_bytes():
+                audio_stream.write(chunk)
+        except Exception:
+            # try reading whole content
+            try:
+                audio_stream.write(speech.read())
+            except Exception:
+                pass
+        audio_stream.seek(0)
+        sound = AudioSegment.from_file(audio_stream, format="mp3")
         play(sound)
     except Exception as e:
         print(f"🎧 [Voice Error]: {e}")
+        traceback.print_exc()
 
-# -------------------------
+# ============================================================
 # 🌦️ Weather Helper
-# -------------------------
+# ============================================================
 def get_weather():
     """Fetch simple weather info using wttr.in"""
     try:
@@ -131,7 +146,6 @@ def get_weather():
         city = g.city or g.state or "your area"
     except Exception:
         city = "your area"
-
     try:
         resp = requests.get("https://wttr.in/?format=3", timeout=6)
         if resp.status_code == 200:
@@ -141,9 +155,9 @@ def get_weather():
     except Exception:
         return "Couldn't fetch the weather right now, Captain."
 
-# -------------------------
+# ============================================================
 # ⚙️ Local Command Handler
-# -------------------------
+# ============================================================
 def local_handle(text: str):
     t = text.lower()
 
@@ -163,16 +177,14 @@ def local_handle(text: str):
         lines = [f"- {m['text']}" for m in mem[-8:]]
         return "I remember:\n" + "\n".join(lines)
 
-    # 🧾 To-Do Tasks
+    # 🧾 Tasks
     if "add task" in t or "remind me to" in t:
         task = text.split("to")[-1].strip(" .")
         if not task:
             return "What should I remind you about, Captain?"
         return add_task(task)
-
     if "show tasks" in t or "what are my tasks" in t or "show reminders" in t:
         return view_tasks()
-
     if "clear tasks" in t or "delete all tasks" in t:
         return clear_tasks()
 
@@ -205,9 +217,6 @@ def local_handle(text: str):
     if "open vs code" in t or "open visual studio code" in t:
         os.system("code")
         return "Opening VS Code, Captain!"
-    if "shutdown" in t or "turn off" in t:
-        os.system("shutdown /s /t 5")
-        return "Shutting down the ship in 5 seconds, Captain!"
 
     # 🗂️ Folder shortcuts
     folders = {
@@ -223,13 +232,13 @@ def local_handle(text: str):
             os.startfile(path)
             return f"Opened {folder} folder, Captain!"
 
-    # 🎵 Play music
+    # 🎵 Music
     if "play song" in t or "play music" in t:
         music_path = os.path.join(os.path.expanduser("~"), "Music")
         os.startfile(music_path)
         return "Opening your music collection, Captain!"
 
-    # 🌐 Websites
+    # 🌐 Sites
     sites = {
         "google": "https://www.google.com",
         "reddit": "https://www.reddit.com",
@@ -244,12 +253,29 @@ def local_handle(text: str):
 
     return None
 
-# -------------------------
-# ⚡ FastAPI Routes
-# -------------------------
+# ============================================================
+# NEW: Conversation context (in-memory session)
+# ============================================================
+conversation_history = []  # list of {"role": "user"/"assistant", "content": "..."}
+MAX_CONVERSATION_HISTORY = 12  # keep last N turns for context
+
+def add_conversation(role: str, content: str):
+    """Append to in-memory conversation history (role: 'user' or 'assistant')"""
+    global conversation_history
+    conversation_history.append({"role": role, "content": content, "time": datetime.now().isoformat()})
+    # keep only last MAX_CONVERSATION_HISTORY entries
+    conversation_history = conversation_history[-MAX_CONVERSATION_HISTORY:]
+
+def clear_conversation():
+    global conversation_history
+    conversation_history = []
+
+# ============================================================
+# 🌊 Routes
+# ============================================================
 @app.get("/")
 def home():
-    return {"message": "🏴‍☠️ Onepiece backend is running strong, Captain!"}
+    return {"message": "🏴‍☠️ Kuma AI backend is sailing strong, Captain!"}
 
 @app.get("/memory")
 def view_memory():
@@ -260,6 +286,17 @@ def api_clear_memory():
     clear_memory()
     return {"ok": True, "message": "Memory cleared."}
 
+# NEW: endpoints for conversation
+@app.get("/conversation")
+def get_conversation():
+    """Return current in-memory conversation history (useful for debugging)."""
+    return {"conversation": conversation_history}
+
+@app.post("/conversation/clear")
+def api_clear_conversation():
+    clear_conversation()
+    return {"ok": True, "message": "Conversation cleared."}
+
 @app.post("/query")
 async def query(request: Request):
     data = await request.json()
@@ -268,45 +305,89 @@ async def query(request: Request):
     if not text:
         return {"reply": "I didn’t hear anything, Captain. Can you repeat that?"}
 
-    # 🧠 Local handling
-    local = local_handle(text)
-    if local:
-        speak_luffy_style(local)
-        return {"reply": local}
+    # Local check (unchanged behaviour)
+    local_reply = local_handle(text)
+    if local_reply:
+        # speak locally and save to persistent memory as before
+        try:
+            speak_kuma(local_reply)
+        except Exception:
+            pass
+        add_memory(f"User: {text}")
+        add_memory(f"Kuma: {local_reply}")
+        # also save to in-memory conversation for session context
+        add_conversation("user", text)
+        add_conversation("assistant", local_reply)
+        return {"reply": local_reply}
 
-    # 🧩 Add memory context
+    # -----------------------------
+    # Build prompt with context:
+    # - System personality prompt (same as before)
+    # - Recent persistent memories (file-based) appended (optional)
+    # - Recent in-memory conversation_history for session context
+    # -----------------------------
     recent_mem = get_recent_memory()
     mem_text = ""
     if recent_mem:
-        mem_text = "Recent memories:\n" + "\n".join([f"- {m['text']}" for m in recent_mem])
+        mem_text = "\nRecent memories:\n" + "\n".join([f"- {m['text']}" for m in recent_mem])
 
-    # 🧠 AI personality
     system_prompt = (
-        "You are Onepiece — a lively, pirate-themed AI inspired by Monkey D. Luffy. "
-        "You are the user's helpful personal assistant; call them 'Captain'. "
-        "Keep replies short, fun, and slightly goofy — like a cheerful pirate."
+        "You are Kuma — a loyal pirate AI assistant aboard the Thousand Sunny. "
+        "You are cheerful, helpful, and always call the user 'Captain'. "
+        "Keep replies short, witty, and natural like a friend at sea."
     )
     if mem_text:
         system_prompt += "\n\n" + mem_text
 
-    # 🌊 Call OpenAI
+    # Build messages list: system + recent conversation (in-memory)
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Include session conversation history to preserve context
+    for item in conversation_history:
+        # conversation_history entries use 'role' keys 'user'/'assistant'
+        messages.append({"role": item["role"], "content": item["content"]})
+
+    # Finally append the new user message
+    messages.append({"role": "user", "content": text})
+
+    # Call OpenAI Chat Completion using current client (existing logic)
     try:
         response = client.chat.completions.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=150,
-            temperature=0.4
+            messages=messages,
+            temperature=0.5,
+            max_tokens=180
         )
         reply = response.choices[0].message.content.strip()
-        speak_luffy_style(reply)
+
+        # Speak the reply (same as before)
+        try:
+            speak_kuma(reply)
+        except Exception:
+            pass
+
+        # Persist memory (same as before)
+        add_memory(f"User: {text}")
+        add_memory(f"Kuma: {reply}")
+
+        # Add to in-memory conversation for future context
+        add_conversation("user", text)
+        add_conversation("assistant", reply)
+
         return {"reply": reply}
 
     except Exception as e:
+        traceback.print_exc()
         fallback = local_handle(text)
         if fallback:
-            speak_luffy_style(fallback)
+            try:
+                speak_kuma(fallback)
+            except Exception:
+                pass
+            # keep behavior consistent with older code
+            add_memory(f"User: {text}")
+            add_memory(f"Kuma: {fallback}")
+            add_conversation("user", text)
+            add_conversation("assistant", fallback)
             return {"reply": fallback}
-        return {"reply": f"Error contacting AI: {str(e)}"}
+        return {"reply": f"Error contacting AI: {e}"}
